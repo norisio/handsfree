@@ -1,15 +1,16 @@
 """Handsfree AI Assistant Pipeline.
 
-[Mic] → Porcupine (wakeword) → Google STT → Gemini LLM (streaming) → gTTS → [Speaker]
+[Mic] → Porcupine (wakeword) → Google STT → Gemini LLM (streaming + MCP tools) → gTTS → [Speaker]
 
 LLM response is streamed sentence-by-sentence: TTS synthesis and playback
 begin as soon as the first sentence is ready, without waiting for the full
-response.
+response. MCP tool calls are resolved before streaming begins.
 
 Usage:
     uv run python pipeline.py
 """
 
+import asyncio
 import os
 import subprocess
 import tempfile
@@ -25,6 +26,8 @@ from google import genai
 from gtts import gTTS
 from pvrecorder import PvRecorder
 
+from mcp_client import McpManager
+
 load_dotenv()
 
 PV_ACCESS_KEY = os.environ["PV_ACCESS_KEY"]
@@ -38,7 +41,8 @@ LISTEN_SECONDS = 5
 SYSTEM_INSTRUCTION = (
     "You are a helpful voice assistant. "
     "Reply concisely in the same language the user speaks. "
-    "Keep responses under 2-3 sentences."
+    "Keep responses under 2-3 sentences. "
+    "Use available tools when they can help answer the user's question."
 )
 
 SENTENCE_DELIMITERS = set("。！？.!?\n")
@@ -137,8 +141,13 @@ def _synthesize_sentence(sentence: str, lang: str, audio_queue: Queue) -> None:
     audio_queue.put(mp3_path)
 
 
-def stream_and_speak(prompt: str, history: list[dict]) -> str:
-    """Stream Gemini response, synthesize TTS per sentence, play back-to-back."""
+def stream_and_speak(
+    prompt: str,
+    history: list[dict],
+    mcp: McpManager,
+    loop: asyncio.AbstractEventLoop,
+) -> str:
+    """Stream Gemini response with MCP tool support, TTS per sentence."""
     client = genai.Client(api_key=GEMINI_API_KEY)
     messages = history + [{"role": "user", "parts": [{"text": prompt}]}]
 
@@ -158,15 +167,19 @@ def stream_and_speak(prompt: str, history: list[dict]) -> str:
             print(f"  >> {sentence}")
             _synthesize_sentence(sentence, lang, audio_queue)
 
-    for chunk in client.models.generate_content_stream(
-        model="gemini-2.5-flash",
-        contents=messages,
-        config={"system_instruction": SYSTEM_INSTRUCTION},
-    ):
-        text = chunk.text or ""
-        full_response.append(text)
+    # Import here to avoid circular
+    from mcp_client import gemini_stream_with_tools
 
-        for char in text:
+    for text_chunk in gemini_stream_with_tools(
+        client=client,
+        model=os.environ.get("GEMINI_MODEL", "gemini-2.5-flash"),
+        contents=messages,
+        system_instruction=SYSTEM_INSTRUCTION,
+        mcp=mcp,
+        loop=loop,
+    ):
+        full_response.append(text_chunk)
+        for char in text_chunk:
             sentence_buf.append(char)
             if char in SENTENCE_DELIMITERS:
                 flush_sentence()
@@ -194,21 +207,33 @@ def main() -> None:
     print("=" * 50)
     print("  Handsfree AI Assistant")
     print(f"  Wakeword: \"{WAKEWORD}\" | Language: {LANGUAGE}")
-    print("  Streaming TTS enabled")
+    print("  Streaming TTS + MCP tools enabled")
     print("=" * 50)
+
+    # Set up async event loop for MCP
+    loop = asyncio.new_event_loop()
+
+    # Connect to MCP servers
+    mcp = McpManager()
+    print("Connecting to MCP servers...")
+    loop.run_until_complete(mcp.connect())
 
     history: list[dict] = []
 
-    while True:
-        try:
-            wait_for_wakeword()
-            text = listen_and_transcribe()
-            if text:
-                print("Assistant:")
-                stream_and_speak(text, history)
-        except KeyboardInterrupt:
-            print("\nGoodbye!")
-            break
+    try:
+        while True:
+            try:
+                wait_for_wakeword()
+                text = listen_and_transcribe()
+                if text:
+                    print("Assistant:")
+                    stream_and_speak(text, history, mcp, loop)
+            except KeyboardInterrupt:
+                print("\nGoodbye!")
+                break
+    finally:
+        loop.run_until_complete(mcp.close())
+        loop.close()
 
 
 if __name__ == "__main__":

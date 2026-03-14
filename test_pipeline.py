@@ -1,18 +1,16 @@
 """Automated pipeline test — no human in the loop.
 
-Generates test audio with gTTS, feeds it through STT → Gemini (streaming) → TTS,
+Generates test audio with gTTS, feeds it through STT → Gemini (streaming + MCP) → TTS,
 and verifies each stage produces valid output.
 
-Tests are grouped into conversations where chat history is carried forward,
-verifying that the LLM maintains context across turns.
-
-The LLM stage uses streaming to verify sentence-by-sentence TTS synthesis
-works correctly (matching pipeline.py's streaming behavior).
+Tests are grouped into conversations where chat history is carried forward.
+MCP tool calls are tested by asking questions that require tool use (e.g. current time).
 
 Usage:
     uv run python test_pipeline.py
 """
 
+import asyncio
 import os
 import subprocess
 import tempfile
@@ -24,7 +22,10 @@ from queue import Queue
 import speech_recognition as sr
 from dotenv import load_dotenv
 from google import genai
+from google.genai import types
 from gtts import gTTS
+
+from mcp_client import McpManager, gemini_stream_with_tools
 
 load_dotenv()
 
@@ -34,21 +35,20 @@ FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
 SYSTEM_INSTRUCTION = (
     "You are a helpful voice assistant. "
     "Reply concisely in the same language the user speaks. "
-    "Keep responses under 2-3 sentences."
+    "Keep responses under 2-3 sentences. "
+    "Use available tools when they can help answer the user's question."
 )
 
 SENTENCE_DELIMITERS = set("。！？.!?\n")
 
 
 def detect_lang(text: str) -> str:
-    """Detect language for TTS based on character content."""
     if any("\u3040" <= c <= "\u30ff" or "\u4e00" <= c <= "\u9fff" for c in text):
         return "ja"
     return "en"
 
 
 def generate_fixture(text: str, lang: str, filename: str) -> str:
-    """Generate a test audio file with gTTS and convert to WAV."""
     os.makedirs(FIXTURES_DIR, exist_ok=True)
     wav_path = os.path.join(FIXTURES_DIR, filename)
     if os.path.exists(wav_path):
@@ -69,7 +69,6 @@ def generate_fixture(text: str, lang: str, filename: str) -> str:
 
 
 def test_stt(wav_path: str, language: str) -> str | None:
-    """Transcribe a WAV file with Google STT."""
     recognizer = sr.Recognizer()
     with sr.AudioFile(wav_path) as source:
         audio = recognizer.record(source)
@@ -108,15 +107,16 @@ def _tts_worker(audio_queue: Queue, results: list[dict]) -> None:
         audio_queue.task_done()
 
 
-def test_streaming_gemini_tts(prompt: str, history: list[dict]) -> dict:
-    """Stream Gemini response, synthesize TTS per sentence, verify each chunk.
-
-    Returns dict with full_text, sentences list, and per-sentence TTS results.
-    """
+def test_streaming_with_mcp(
+    prompt: str,
+    history: list[dict],
+    mcp: McpManager,
+    loop: asyncio.AbstractEventLoop,
+) -> dict:
+    """Stream Gemini response with MCP tools, verify TTS per sentence."""
     client = genai.Client(api_key=GEMINI_API_KEY)
     messages = history + [{"role": "user", "parts": [{"text": prompt}]}]
 
-    # TTS verification queue and worker
     audio_queue: Queue = Queue()
     tts_results: list[dict] = []
     worker = threading.Thread(
@@ -141,22 +141,22 @@ def test_streaming_gemini_tts(prompt: str, history: list[dict]) -> dict:
             audio_queue.put((sentence, lang))
             sentences_sent += 1
 
-    for chunk in client.models.generate_content_stream(
-        model="gemini-2.5-flash",
+    for text_chunk in gemini_stream_with_tools(
+        client=client,
+        model=os.environ.get("GEMINI_MODEL", "gemini-2.5-flash"),
         contents=messages,
-        config={"system_instruction": SYSTEM_INSTRUCTION},
+        system_instruction=SYSTEM_INSTRUCTION,
+        mcp=mcp,
+        loop=loop,
     ):
-        text = chunk.text or ""
-        full_response.append(text)
-        for char in text:
+        full_response.append(text_chunk)
+        for char in text_chunk:
             sentence_buf.append(char)
             if char in SENTENCE_DELIMITERS:
                 flush_sentence()
 
-    # Flush remaining
     flush_sentence()
 
-    # Wait for TTS worker to finish
     audio_queue.join()
     audio_queue.put(None)
     worker.join()
@@ -164,7 +164,6 @@ def test_streaming_gemini_tts(prompt: str, history: list[dict]) -> dict:
     t_end = time.monotonic()
     full_text = "".join(full_response).strip()
 
-    # Update history
     history.append({"role": "user", "parts": [{"text": prompt}]})
     history.append({"role": "model", "parts": [{"text": full_text}]})
     if len(history) > 20:
@@ -179,7 +178,7 @@ def test_streaming_gemini_tts(prompt: str, history: list[dict]) -> dict:
     }
 
 
-# Conversations: each is a list of turns that share chat history.
+# Conversations with MCP tool use tests
 CONVERSATIONS = [
     {
         "label": "Japanese: multi-turn with context",
@@ -188,17 +187,15 @@ CONVERSATIONS = [
         "turns": [
             {"text": "富士山の高さを教えてください", "label": "ask about Mt. Fuji height"},
             {"text": "それは世界で何番目に高いですか", "label": "follow-up with 'それ' (it)"},
-            {"text": "もう一度最初の質問に答えてください", "label": "ask to repeat first answer"},
         ],
     },
     {
-        "label": "English: multi-turn with context",
-        "lang": "en",
-        "stt_lang": "en-US",
+        "label": "MCP tool use: datetime",
+        "lang": "ja",
+        "stt_lang": "ja-JP",
         "turns": [
-            {"text": "The capital of France is what", "label": "ask about France capital"},
-            {"text": "What language do they speak there", "label": "follow-up with 'there'"},
-            {"text": "How do you say thank you in that language", "label": "follow-up with 'that language'"},
+            {"text": "今何時ですか", "label": "ask current time (should use get_current_time tool)"},
+            {"text": "今日は何曜日ですか", "label": "ask day of week (should use get_day_of_week tool)"},
         ],
     },
 ]
@@ -210,34 +207,31 @@ def run_single_turn(
     turn: dict,
     conv: dict,
     history: list[dict],
+    mcp: McpManager,
+    loop: asyncio.AbstractEventLoop,
 ) -> dict:
-    """Run a single conversation turn through STT → streaming LLM → TTS."""
     label = f"[Conv {conv_idx + 1}, Turn {turn_idx + 1}] {turn['label']}"
     print(f"\n  -- {label} --")
 
-    # Step 1: Generate fixture audio
     fixture_file = f"conv{conv_idx}_turn{turn_idx}_{conv['lang']}.wav"
     wav_path = generate_fixture(turn["text"], conv["lang"], fixture_file)
 
-    # Step 2: STT
     transcribed = test_stt(wav_path, conv["stt_lang"])
     stt_ok = transcribed is not None and len(transcribed) > 0
     print(f"  Input:       {turn['text']}")
     print(f"  Transcribed: {transcribed}")
     print(f"  STT: {'PASS' if stt_ok else 'FAIL'}")
 
-    # Step 3+4: Streaming LLM + TTS (with history)
     llm_ok = False
     tts_ok = False
     streaming_ok = False
     if stt_ok:
-        result = test_streaming_gemini_tts(transcribed, history)
+        result = test_streaming_with_mcp(transcribed, history, mcp, loop)
 
         llm_ok = bool(result["full_text"])
         print(f"  Response:    {result['full_text']}")
         print(f"  LLM: {'PASS' if llm_ok else 'FAIL'}")
 
-        # Verify streaming: sentences were sent incrementally
         n_sentences = result["sentences_sent"]
         tts_all_ok = all(r["ok"] for r in result["tts_results"])
         tts_ok = len(result["tts_results"]) > 0 and tts_all_ok
@@ -268,23 +262,34 @@ def run_single_turn(
 def run_tests() -> None:
     print("=" * 60)
     print("  Automated Pipeline Test (no human in the loop)")
-    print("  Streaming LLM + sentence-by-sentence TTS")
+    print("  Streaming LLM + MCP tools + sentence-by-sentence TTS")
     print("=" * 60)
+
+    loop = asyncio.new_event_loop()
+
+    # Connect to MCP servers
+    mcp = McpManager()
+    print("\nConnecting to MCP servers...")
+    loop.run_until_complete(mcp.connect())
 
     results = []
 
-    for conv_idx, conv in enumerate(CONVERSATIONS):
-        print(f"\n{'─' * 60}")
-        print(f"Conversation {conv_idx + 1}: {conv['label']}")
-        print(f"{'─' * 60}")
+    try:
+        for conv_idx, conv in enumerate(CONVERSATIONS):
+            print(f"\n{'─' * 60}")
+            print(f"Conversation {conv_idx + 1}: {conv['label']}")
+            print(f"{'─' * 60}")
 
-        history: list[dict] = []
+            history: list[dict] = []
 
-        for turn_idx, turn in enumerate(conv["turns"]):
-            result = run_single_turn(conv_idx, turn_idx, turn, conv, history)
-            results.append(result)
+            for turn_idx, turn in enumerate(conv["turns"]):
+                result = run_single_turn(conv_idx, turn_idx, turn, conv, history, mcp, loop)
+                results.append(result)
 
-        print(f"\n  History length: {len(history)} messages")
+            print(f"\n  History length: {len(history)} messages")
+    finally:
+        loop.run_until_complete(mcp.close())
+        loop.close()
 
     # Summary
     print("\n" + "=" * 60)

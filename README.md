@@ -14,34 +14,51 @@ uv run python pipeline.py
 
 # Run automated tests (no mic needed)
 uv run python test_pipeline.py
+
+# Use a different Gemini model
+GEMINI_MODEL=gemini-2.5-flash-lite uv run python test_pipeline.py
 ```
 
-Say **"computer"** → speak your question → hear the response. Ctrl+C to quit.
+Say **"computer"** -> speak your question -> hear the response. Ctrl+C to quit.
 
 ## Pipeline
 
 ```
-[Mic] → Porcupine (wakeword) → Google STT → Gemini 2.5 Flash (streaming) → gTTS → [Speaker]
+[Mic] -> Porcupine (wakeword) -> Google STT -> Gemini (streaming + MCP tools) -> gTTS -> [Speaker]
 ```
 
 ### Streaming TTS
 
 The LLM response is streamed sentence-by-sentence. TTS synthesis begins as
-soon as the first sentence is complete — there is no wait for the full response.
-Sentences are split at delimiters (。！？.!?) and played back-to-back via a
-background thread with a queue.
+soon as the first sentence is complete. Sentences are split at delimiters
+and played back-to-back via a background thread with a queue.
 
-```
-Gemini stream: [sentence 1]...[sentence 2]...[sentence 3]...
-TTS playback:  [  synth 1  ][play 1][synth 2][play 2]...
-                            ^
-                            audio starts here, not after full response
+### MCP Tool Use
+
+MCP (Model Context Protocol) servers are configured in mcp_config.json.
+Tools from MCP servers are automatically converted to Gemini function
+declarations. When Gemini requests a tool call, it is executed via the
+MCP client and the result is sent back for the final response.
+
+Built-in MCP server:
+- **datetime** (servers/datetime_server.py) - get_current_time, get_day_of_week
+
+Add more servers by editing mcp_config.json:
+```json
+{
+  "mcpServers": {
+    "my_server": {
+      "command": "uv",
+      "args": ["run", "python", "servers/my_server.py"]
+    }
+  }
+}
 ```
 
 ### Chat History
 
 Chat history is maintained across turns so the assistant can handle follow-up
-questions with pronouns and contextual references (e.g. "それ", "there", "that").
+questions with pronouns and contextual references.
 
 ### Components
 
@@ -49,37 +66,37 @@ questions with pronouns and contextual references (e.g. "それ", "there", "that
 |----------|--------------------------|----------------------|---------------------------------------------|
 | Wakeword | Porcupine (Picovoice)    | pvporcupine          | On-device, ~3.8% CPU on RPi 3               |
 | STT      | Google Web Speech API    | SpeechRecognition    | Japanese (ja-JP) supported, via FLAC upload  |
-| LLM      | Gemini API (Google)      | google-genai         | Streaming response, free tier (2.5 Flash)    |
+| LLM      | Gemini API (Google)      | google-genai         | Streaming, function calling, free tier       |
 | TTS      | Google Text-to-Speech    | gTTS                 | Japanese + English, sentence-level streaming  |
+| Tools    | MCP                      | mcp                  | Extensible tool use via MCP servers           |
 
 ### Why this architecture?
 
-- **RPi 3B+ has only 900MB RAM** — local LLM (e.g. picoLLM) is not feasible.
-- Porcupine runs on-device for always-on wakeword detection with minimal CPU usage.
-- Google Web Speech API chosen over Picovoice Cheetah because **Cheetah doesn't support Japanese**.
-- gTTS used instead of Picovoice Orca because Orca only ships with an English model by default.
-- Gemini free tier is sufficient for a personal assistant (5-15 RPM, 100-1,000 req/day).
+- **RPi 3B+ has only 900MB RAM** - local LLM (e.g. picoLLM) is not feasible.
+- Porcupine runs on-device for always-on wakeword detection with minimal CPU.
+- Google Web Speech API chosen over Picovoice Cheetah because Cheetah doesn't support Japanese.
+- gTTS used instead of Picovoice Orca because Orca only ships with an English model.
+- MCP enables extensible tool use without modifying the core pipeline.
 
 ## Testing
 
-Automated tests run the full STT → streaming LLM → TTS pipeline without a
-microphone or human input. gTTS generates test audio fixtures which are fed
-back through the pipeline.
+Automated tests run the full STT -> streaming LLM + MCP -> TTS pipeline without
+a microphone or human input. gTTS generates test audio fixtures.
 
 Tests verify:
-- **STT** — Google recognizes the generated audio
-- **LLM** — Gemini responds with context from chat history
-- **Streaming** — response is split into sentences and streamed incrementally
-- **TTS** — each sentence chunk produces valid audio output
-
-Test conversations:
-- **Japanese:** Asks about Mt. Fuji, then uses "それ" (it) in a follow-up,
-  then asks to repeat the first answer.
-- **English:** Asks about France's capital, then "there", then "that language".
+- **STT** - Google recognizes the generated audio
+- **LLM** - Gemini responds with context from chat history
+- **Streaming** - response is split into sentences and streamed incrementally
+- **TTS** - each sentence chunk produces valid audio output
+- **MCP** - tool registration and availability
 
 ```bash
 uv run python test_pipeline.py
 ```
+
+Note: Gemini free tier has rate limits (20 req/min per model). The test suite
+includes rate limiting (4s between requests). Use GEMINI_MODEL env var to
+switch models if needed.
 
 ## Hardware
 
@@ -101,9 +118,28 @@ uv run python test_pipeline.py
 
 ## Required API Keys
 
-Store these in a `.env` file in the project root:
+Store these in a .env file in the project root:
 
 | Variable       | Source                                    |
 |----------------|-------------------------------------------|
 | PV_ACCESS_KEY  | https://console.picovoice.ai/             |
 | GEMINI_API_KEY | https://ai.google.dev/ (Google AI Studio) |
+
+Optional:
+
+| Variable      | Default             | Description             |
+|---------------|---------------------|-------------------------|
+| GEMINI_MODEL  | gemini-2.5-flash    | Gemini model to use     |
+
+## Project Structure
+
+```
+handsfree/
+  pipeline.py          # Main assistant loop (wakeword -> STT -> LLM -> TTS)
+  test_pipeline.py     # Automated tests (no human needed)
+  mcp_client.py        # MCP client + Gemini function calling bridge
+  mcp_config.json      # MCP server configuration
+  servers/
+    datetime_server.py  # Built-in datetime MCP server
+  .env                 # API keys (not committed)
+```
