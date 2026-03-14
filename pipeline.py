@@ -1,6 +1,10 @@
 """Handsfree AI Assistant Pipeline.
 
-[Mic] → Porcupine (wakeword) → Google STT → Gemini LLM → gTTS → [Speaker]
+[Mic] → Porcupine (wakeword) → Google STT → Gemini LLM (streaming) → gTTS → [Speaker]
+
+LLM response is streamed sentence-by-sentence: TTS synthesis and playback
+begin as soon as the first sentence is ready, without waiting for the full
+response.
 
 Usage:
     uv run python pipeline.py
@@ -9,8 +13,10 @@ Usage:
 import os
 import subprocess
 import tempfile
+import threading
 import time
 import wave
+from queue import Queue
 
 import pvporcupine
 import speech_recognition as sr
@@ -28,6 +34,21 @@ LANGUAGE = "ja-JP"
 WAKEWORD = "computer"
 SAMPLE_RATE = 16000
 LISTEN_SECONDS = 5
+
+SYSTEM_INSTRUCTION = (
+    "You are a helpful voice assistant. "
+    "Reply concisely in the same language the user speaks. "
+    "Keep responses under 2-3 sentences."
+)
+
+SENTENCE_DELIMITERS = set("。！？.!?\n")
+
+
+def detect_lang(text: str) -> str:
+    """Detect language for TTS based on character content."""
+    if any("\u3040" <= c <= "\u30ff" or "\u4e00" <= c <= "\u9fff" for c in text):
+        return "ja"
+    return "en"
 
 
 def wait_for_wakeword() -> None:
@@ -60,13 +81,11 @@ def listen_and_transcribe() -> str | None:
     total = int(SAMPLE_RATE / 512 * LISTEN_SECONDS)
     for _ in range(total):
         frame = recorder.read()
-        # Convert to 16-bit PCM bytes
         frames.append(b"".join(v.to_bytes(2, "little", signed=True) for v in frame))
 
     recorder.stop()
     recorder.delete()
 
-    # Write to temporary WAV file
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
         wav_path = f.name
         with wave.open(f, "wb") as wf:
@@ -75,7 +94,6 @@ def listen_and_transcribe() -> str | None:
             wf.setframerate(SAMPLE_RATE)
             wf.writeframes(b"".join(frames))
 
-    # Transcribe with Google STT
     recognizer = sr.Recognizer()
     try:
         with sr.AudioFile(wav_path) as source:
@@ -93,54 +111,90 @@ def listen_and_transcribe() -> str | None:
         os.unlink(wav_path)
 
 
-def ask_gemini(prompt: str, history: list[dict]) -> str:
-    """Send prompt to Gemini and return response text."""
-    client = genai.Client(api_key=GEMINI_API_KEY)
-    messages = history + [{"role": "user", "parts": [{"text": prompt}]}]
-    response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=messages,
-        config={
-            "system_instruction": (
-                "You are a helpful voice assistant. "
-                "Reply concisely in the same language the user speaks. "
-                "Keep responses under 2-3 sentences."
-            ),
-        },
-    )
-    text = response.text.strip()
-    # Update history
-    history.append({"role": "user", "parts": [{"text": prompt}]})
-    history.append({"role": "model", "parts": [{"text": text}]})
-    # Keep history manageable
-    if len(history) > 20:
-        history[:] = history[-20:]
-    return text
+def _tts_worker(audio_queue: Queue) -> None:
+    """Background thread: pull audio file paths from queue and play them."""
+    while True:
+        item = audio_queue.get()
+        if item is None:  # poison pill
+            break
+        mp3_path = item
+        try:
+            subprocess.run(
+                ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", mp3_path],
+                check=True,
+            )
+        finally:
+            os.unlink(mp3_path)
+        audio_queue.task_done()
 
 
-def speak(text: str) -> None:
-    """Convert text to speech and play it."""
-    lang = "ja" if any("\u3000" <= c <= "\u9fff" or "\u3040" <= c <= "\u30ff" for c in text) else "en"
+def _synthesize_sentence(sentence: str, lang: str, audio_queue: Queue) -> None:
+    """Synthesize one sentence and enqueue the audio for playback."""
     with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
         mp3_path = f.name
-
-    tts = gTTS(text=text, lang=lang)
+    tts = gTTS(text=sentence, lang=lang)
     tts.save(mp3_path)
-    print(f"Assistant: {text}")
+    audio_queue.put(mp3_path)
 
-    try:
-        subprocess.run(
-            ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", mp3_path],
-            check=True,
-        )
-    finally:
-        os.unlink(mp3_path)
+
+def stream_and_speak(prompt: str, history: list[dict]) -> str:
+    """Stream Gemini response, synthesize TTS per sentence, play back-to-back."""
+    client = genai.Client(api_key=GEMINI_API_KEY)
+    messages = history + [{"role": "user", "parts": [{"text": prompt}]}]
+
+    # Audio playback queue and worker thread
+    audio_queue: Queue = Queue()
+    player = threading.Thread(target=_tts_worker, args=(audio_queue,), daemon=True)
+    player.start()
+
+    full_response = []
+    sentence_buf = []
+
+    def flush_sentence():
+        sentence = "".join(sentence_buf).strip()
+        sentence_buf.clear()
+        if sentence:
+            lang = detect_lang(sentence)
+            print(f"  >> {sentence}")
+            _synthesize_sentence(sentence, lang, audio_queue)
+
+    for chunk in client.models.generate_content_stream(
+        model="gemini-2.5-flash",
+        contents=messages,
+        config={"system_instruction": SYSTEM_INSTRUCTION},
+    ):
+        text = chunk.text or ""
+        full_response.append(text)
+
+        for char in text:
+            sentence_buf.append(char)
+            if char in SENTENCE_DELIMITERS:
+                flush_sentence()
+
+    # Flush any remaining text
+    flush_sentence()
+
+    # Wait for all audio to finish playing
+    audio_queue.join()
+    audio_queue.put(None)  # stop worker
+    player.join()
+
+    full_text = "".join(full_response).strip()
+
+    # Update history
+    history.append({"role": "user", "parts": [{"text": prompt}]})
+    history.append({"role": "model", "parts": [{"text": full_text}]})
+    if len(history) > 20:
+        history[:] = history[-20:]
+
+    return full_text
 
 
 def main() -> None:
     print("=" * 50)
     print("  Handsfree AI Assistant")
     print(f"  Wakeword: \"{WAKEWORD}\" | Language: {LANGUAGE}")
+    print("  Streaming TTS enabled")
     print("=" * 50)
 
     history: list[dict] = []
@@ -150,8 +204,8 @@ def main() -> None:
             wait_for_wakeword()
             text = listen_and_transcribe()
             if text:
-                response = ask_gemini(text, history)
-                speak(response)
+                print("Assistant:")
+                stream_and_speak(text, history)
         except KeyboardInterrupt:
             print("\nGoodbye!")
             break

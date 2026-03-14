@@ -21,11 +21,27 @@ Say **"computer"** → speak your question → hear the response. Ctrl+C to quit
 ## Pipeline
 
 ```
-[Mic] → Porcupine (wakeword) → Google STT → Gemini 2.5 Flash → gTTS → [Speaker]
+[Mic] → Porcupine (wakeword) → Google STT → Gemini 2.5 Flash (streaming) → gTTS → [Speaker]
 ```
 
+### Streaming TTS
+
+The LLM response is streamed sentence-by-sentence. TTS synthesis begins as
+soon as the first sentence is complete — there is no wait for the full response.
+Sentences are split at delimiters (。！？.!?) and played back-to-back via a
+background thread with a queue.
+
+```
+Gemini stream: [sentence 1]...[sentence 2]...[sentence 3]...
+TTS playback:  [  synth 1  ][play 1][synth 2][play 2]...
+                            ^
+                            audio starts here, not after full response
+```
+
+### Chat History
+
 Chat history is maintained across turns so the assistant can handle follow-up
-questions with pronouns and contextual references (e.g. "it", "there", "that").
+questions with pronouns and contextual references (e.g. "それ", "there", "that").
 
 ### Components
 
@@ -33,8 +49,8 @@ questions with pronouns and contextual references (e.g. "it", "there", "that").
 |----------|--------------------------|----------------------|---------------------------------------------|
 | Wakeword | Porcupine (Picovoice)    | pvporcupine          | On-device, ~3.8% CPU on RPi 3               |
 | STT      | Google Web Speech API    | SpeechRecognition    | Japanese (ja-JP) supported, via FLAC upload  |
-| LLM      | Gemini API (Google)      | google-genai         | Free tier: 2.5 Flash, chat history supported |
-| TTS      | Google Text-to-Speech    | gTTS                 | Japanese + English, plays via ffplay         |
+| LLM      | Gemini API (Google)      | google-genai         | Streaming response, free tier (2.5 Flash)    |
+| TTS      | Google Text-to-Speech    | gTTS                 | Japanese + English, sentence-level streaming  |
 
 ### Why this architecture?
 
@@ -46,16 +62,20 @@ questions with pronouns and contextual references (e.g. "it", "there", "that").
 
 ## Testing
 
-Automated tests run the full STT → LLM → TTS pipeline without a microphone or
-human input. gTTS generates test audio fixtures which are fed back through
-Google STT, then to Gemini, then to TTS output.
+Automated tests run the full STT → streaming LLM → TTS pipeline without a
+microphone or human input. gTTS generates test audio fixtures which are fed
+back through the pipeline.
 
-Tests are grouped into multi-turn conversations that verify chat history works:
+Tests verify:
+- **STT** — Google recognizes the generated audio
+- **LLM** — Gemini responds with context from chat history
+- **Streaming** — response is split into sentences and streamed incrementally
+- **TTS** — each sentence chunk produces valid audio output
 
-- **Japanese conversation:** Asks about Mt. Fuji, then uses "それ" (it) in a
-  follow-up, then asks to repeat the first answer.
-- **English conversation:** Asks about France's capital, then "there", then
-  "that language" — each requiring context from previous turns.
+Test conversations:
+- **Japanese:** Asks about Mt. Fuji, then uses "それ" (it) in a follow-up,
+  then asks to repeat the first answer.
+- **English:** Asks about France's capital, then "there", then "that language".
 
 ```bash
 uv run python test_pipeline.py
