@@ -1,0 +1,15 @@
+[project]
+name = "handsfree"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "google-genai>=1.67.0",
+    "gtts>=2.5.4",
+    "pvorca>=3.0.0",
+    "pvporcupine>=4.0.2",
+    "pvrecorder>=1.2.7",
+    "python-dotenv>=1.2.2",
+    "speechrecognition>=3.15.1",
+]
