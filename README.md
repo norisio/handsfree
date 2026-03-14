@@ -11,6 +11,9 @@ cp .env.example .env  # then edit with your keys
 
 # Run the assistant
 uv run python pipeline.py
+
+# Run automated tests (no mic needed)
+uv run python test_pipeline.py
 ```
 
 Say **"computer"** → speak your question → hear the response. Ctrl+C to quit.
@@ -21,13 +24,16 @@ Say **"computer"** → speak your question → hear the response. Ctrl+C to quit
 [Mic] → Porcupine (wakeword) → Google STT → Gemini 2.5 Flash → gTTS → [Speaker]
 ```
 
+Chat history is maintained across turns so the assistant can handle follow-up
+questions with pronouns and contextual references (e.g. "it", "there", "that").
+
 ### Components
 
 | Stage    | Service                  | Package              | Notes                                       |
 |----------|--------------------------|----------------------|---------------------------------------------|
 | Wakeword | Porcupine (Picovoice)    | pvporcupine          | On-device, ~3.8% CPU on RPi 3               |
 | STT      | Google Web Speech API    | SpeechRecognition    | Japanese (ja-JP) supported, via FLAC upload  |
-| LLM      | Gemini API (Google)      | google-genai         | Free tier: 2.5 Flash, no credit card needed  |
+| LLM      | Gemini API (Google)      | google-genai         | Free tier: 2.5 Flash, chat history supported |
 | TTS      | Google Text-to-Speech    | gTTS                 | Japanese + English, plays via ffplay         |
 
 ### Why this architecture?
@@ -37,6 +43,23 @@ Say **"computer"** → speak your question → hear the response. Ctrl+C to quit
 - Google Web Speech API chosen over Picovoice Cheetah because **Cheetah doesn't support Japanese**.
 - gTTS used instead of Picovoice Orca because Orca only ships with an English model by default.
 - Gemini free tier is sufficient for a personal assistant (5-15 RPM, 100-1,000 req/day).
+
+## Testing
+
+Automated tests run the full STT → LLM → TTS pipeline without a microphone or
+human input. gTTS generates test audio fixtures which are fed back through
+Google STT, then to Gemini, then to TTS output.
+
+Tests are grouped into multi-turn conversations that verify chat history works:
+
+- **Japanese conversation:** Asks about Mt. Fuji, then uses "それ" (it) in a
+  follow-up, then asks to repeat the first answer.
+- **English conversation:** Asks about France's capital, then "there", then
+  "that language" — each requiring context from previous turns.
+
+```bash
+uv run python test_pipeline.py
+```
 
 ## Hardware
 

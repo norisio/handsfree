@@ -3,6 +3,9 @@
 Generates test audio with gTTS, feeds it through STT → Gemini → TTS,
 and verifies each stage produces valid output.
 
+Tests are grouped into conversations where chat history is carried forward,
+verifying that the LLM maintains context across turns.
+
 Usage:
     uv run python test_pipeline.py
 """
@@ -21,6 +24,12 @@ load_dotenv()
 
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
+
+SYSTEM_INSTRUCTION = (
+    "You are a helpful voice assistant. "
+    "Reply concisely in the same language the user speaks. "
+    "Keep responses under 2-3 sentences."
+)
 
 
 def generate_fixture(text: str, lang: str, filename: str) -> str:
@@ -56,21 +65,22 @@ def test_stt(wav_path: str, language: str) -> str | None:
         return None
 
 
-def test_gemini(prompt: str) -> str:
-    """Send a prompt to Gemini and return the response."""
+def test_gemini(prompt: str, history: list[dict]) -> str:
+    """Send a prompt to Gemini with chat history and return the response."""
     client = genai.Client(api_key=GEMINI_API_KEY)
+    messages = history + [{"role": "user", "parts": [{"text": prompt}]}]
     response = client.models.generate_content(
         model="gemini-2.5-flash",
-        contents=prompt,
-        config={
-            "system_instruction": (
-                "You are a helpful voice assistant. "
-                "Reply concisely in the same language the user speaks. "
-                "Keep responses under 2-3 sentences."
-            ),
-        },
+        contents=messages,
+        config={"system_instruction": SYSTEM_INSTRUCTION},
     )
-    return response.text.strip()
+    text = response.text.strip()
+    # Update history
+    history.append({"role": "user", "parts": [{"text": prompt}]})
+    history.append({"role": "model", "parts": [{"text": text}]})
+    if len(history) > 20:
+        history[:] = history[-20:]
+    return text
 
 
 def test_tts(text: str, lang: str) -> str:
@@ -91,71 +101,100 @@ def test_tts(text: str, lang: str) -> str:
     return wav_path
 
 
-TEST_CASES = [
-    {"text": "今日の天気はどうですか", "lang": "ja", "stt_lang": "ja-JP", "label": "Japanese: weather question"},
-    {"text": "あなたの名前は何ですか", "lang": "ja", "stt_lang": "ja-JP", "label": "Japanese: name question"},
-    {"text": "What time is it now", "lang": "en", "stt_lang": "en-US", "label": "English: time question"},
+# Conversations: each is a list of turns that share chat history.
+# Follow-up turns use pronouns/references that only make sense with context.
+CONVERSATIONS = [
+    {
+        "label": "Japanese: multi-turn with context",
+        "lang": "ja",
+        "stt_lang": "ja-JP",
+        "turns": [
+            {"text": "富士山の高さを教えてください", "label": "ask about Mt. Fuji height"},
+            {"text": "それは世界で何番目に高いですか", "label": "follow-up with 'それ' (it)"},
+            {"text": "もう一度最初の質問に答えてください", "label": "ask to repeat first answer"},
+        ],
+    },
+    {
+        "label": "English: multi-turn with context",
+        "lang": "en",
+        "stt_lang": "en-US",
+        "turns": [
+            {"text": "The capital of France is what", "label": "ask about France capital"},
+            {"text": "What language do they speak there", "label": "follow-up with 'there'"},
+            {"text": "How do you say thank you in that language", "label": "follow-up with 'that language'"},
+        ],
+    },
 ]
+
+
+def run_single_turn(
+    conv_idx: int,
+    turn_idx: int,
+    turn: dict,
+    conv: dict,
+    history: list[dict],
+) -> dict:
+    """Run a single conversation turn through STT → LLM → TTS."""
+    label = f"[Conv {conv_idx + 1}, Turn {turn_idx + 1}] {turn['label']}"
+    print(f"\n  -- {label} --")
+
+    # Step 1: Generate fixture audio
+    fixture_file = f"conv{conv_idx}_turn{turn_idx}_{conv['lang']}.wav"
+    wav_path = generate_fixture(turn["text"], conv["lang"], fixture_file)
+
+    # Step 2: STT
+    transcribed = test_stt(wav_path, conv["stt_lang"])
+    stt_ok = transcribed is not None and len(transcribed) > 0
+    print(f"  Input:       {turn['text']}")
+    print(f"  Transcribed: {transcribed}")
+    print(f"  STT: {'PASS' if stt_ok else 'FAIL'}")
+
+    # Step 3: Gemini LLM (with history)
+    llm_response = None
+    llm_ok = False
+    if stt_ok:
+        llm_response = test_gemini(transcribed, history)
+        llm_ok = llm_response is not None and len(llm_response) > 0
+        print(f"  Response:    {llm_response}")
+        print(f"  LLM: {'PASS' if llm_ok else 'FAIL'}")
+    else:
+        print("  LLM: SKIP (STT failed)")
+
+    # Step 4: TTS
+    tts_ok = False
+    if llm_ok:
+        tts_path = test_tts(llm_response, conv["lang"])
+        with wave.open(tts_path, "rb") as wf:
+            frames = wf.getnframes()
+            tts_ok = frames > 0
+        print(f"  TTS: PASS ({frames / 16000:.1f}s)")
+        os.unlink(tts_path)
+    else:
+        print("  TTS: SKIP (LLM failed)")
+
+    return {"label": label, "stt": stt_ok, "llm": llm_ok, "tts": tts_ok, "all": stt_ok and llm_ok and tts_ok}
 
 
 def run_tests() -> None:
     print("=" * 60)
     print("  Automated Pipeline Test (no human in the loop)")
+    print("  Multi-turn conversations with chat history")
     print("=" * 60)
 
     results = []
 
-    for i, case in enumerate(TEST_CASES):
-        print(f"\n--- Test {i + 1}: {case['label']} ---")
+    for conv_idx, conv in enumerate(CONVERSATIONS):
+        print(f"\n{'─' * 60}")
+        print(f"Conversation {conv_idx + 1}: {conv['label']}")
+        print(f"{'─' * 60}")
 
-        # Step 1: Generate fixture audio
-        print("[1/4] Generating test audio...")
-        fixture_file = f"test_{i}_{case['lang']}.wav"
-        wav_path = generate_fixture(case["text"], case["lang"], fixture_file)
+        history: list[dict] = []
 
-        # Step 2: STT
-        print("[2/4] Running STT...")
-        transcribed = test_stt(wav_path, case["stt_lang"])
-        stt_ok = transcribed is not None and len(transcribed) > 0
-        print(f"  Input:      {case['text']}")
-        print(f"  Transcribed: {transcribed}")
-        print(f"  STT: {'PASS' if stt_ok else 'FAIL'}")
+        for turn_idx, turn in enumerate(conv["turns"]):
+            result = run_single_turn(conv_idx, turn_idx, turn, conv, history)
+            results.append(result)
 
-        # Step 3: Gemini LLM
-        llm_response = None
-        llm_ok = False
-        if stt_ok:
-            print("[3/4] Querying Gemini...")
-            llm_response = test_gemini(transcribed)
-            llm_ok = llm_response is not None and len(llm_response) > 0
-            print(f"  Response:   {llm_response}")
-            print(f"  LLM: {'PASS' if llm_ok else 'FAIL'}")
-        else:
-            print("[3/4] Skipped (STT failed)")
-
-        # Step 4: TTS
-        tts_ok = False
-        if llm_ok:
-            print("[4/4] Generating TTS response...")
-            tts_lang = case["lang"]
-            tts_path = test_tts(llm_response, tts_lang)
-            # Verify the output WAV is valid and has audio data
-            with wave.open(tts_path, "rb") as wf:
-                frames = wf.getnframes()
-                tts_ok = frames > 0
-            print(f"  Output WAV: {frames} frames ({frames / 16000:.1f}s)")
-            print(f"  TTS: {'PASS' if tts_ok else 'FAIL'}")
-            os.unlink(tts_path)
-        else:
-            print("[4/4] Skipped (LLM failed)")
-
-        results.append({
-            "label": case["label"],
-            "stt": stt_ok,
-            "llm": llm_ok,
-            "tts": tts_ok,
-            "all": stt_ok and llm_ok and tts_ok,
-        })
+        print(f"\n  History length: {len(history)} messages")
 
     # Summary
     print("\n" + "=" * 60)
