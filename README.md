@@ -19,7 +19,7 @@ uv run python test_pipeline.py
 GEMINI_MODEL=gemini-2.5-flash-lite uv run python test_pipeline.py
 ```
 
-Say **"computer"** -> speak your question -> hear the response. Ctrl+C to quit.
+Say **"ジェミニさん"** -> speak your question -> hear the response. Ctrl+C to quit.
 
 ## Pipeline
 

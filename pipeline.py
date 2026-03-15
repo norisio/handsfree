@@ -34,7 +34,11 @@ PV_ACCESS_KEY = os.environ["PV_ACCESS_KEY"]
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 MIC_DEVICE_INDEX = 1  # Logitech StreamCam
 LANGUAGE = "ja-JP"
-WAKEWORD = "computer"
+WAKEWORD_PATH = os.environ.get(
+    "WAKEWORD_PATH",
+    os.path.join(os.path.dirname(__file__), "ジェミニさん_ja_raspberry-pi_v4_0_0.ppn"),
+)
+WAKEWORD_LABEL = "ジェミニさん"
 SAMPLE_RATE = 16000
 MAX_LISTEN_SECONDS = 15
 TTS_SPEED = float(os.environ.get("TTS_SPEED", "1.3"))  # 1.0 = normal, 1.5 = 50% faster
@@ -62,11 +66,13 @@ def detect_lang(text: str) -> str:
 
 def wait_for_wakeword() -> None:
     """Block until wakeword is detected."""
-    porcupine = pvporcupine.create(access_key=PV_ACCESS_KEY, keywords=[WAKEWORD])
+    porcupine = pvporcupine.create(
+        access_key=PV_ACCESS_KEY, keyword_paths=[WAKEWORD_PATH]
+    )
     recorder = PvRecorder(
         frame_length=porcupine.frame_length, device_index=MIC_DEVICE_INDEX
     )
-    print(f'Waiting for wakeword "{WAKEWORD}"...')
+    print(f'Waiting for wakeword "{WAKEWORD_LABEL}"...')
     recorder.start()
     try:
         while True:
@@ -231,7 +237,7 @@ def stream_and_speak(
 def main() -> None:
     print("=" * 50)
     print("  Handsfree AI Assistant")
-    print(f"  Wakeword: \"{WAKEWORD}\" | Language: {LANGUAGE}")
+    print(f"  Wakeword: \"{WAKEWORD_LABEL}\" | Language: {LANGUAGE}")
     print("  Streaming TTS + MCP tools enabled")
     print("=" * 50)
 
