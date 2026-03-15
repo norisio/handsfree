@@ -36,8 +36,12 @@ MIC_DEVICE_INDEX = 1  # Logitech StreamCam
 LANGUAGE = "ja-JP"
 WAKEWORD = "computer"
 SAMPLE_RATE = 16000
-LISTEN_SECONDS = 5
+MAX_LISTEN_SECONDS = 15
 TTS_SPEED = float(os.environ.get("TTS_SPEED", "1.3"))  # 1.0 = normal, 1.5 = 50% faster
+
+# Silence detection
+SILENCE_THRESHOLD = int(os.environ.get("SILENCE_THRESHOLD", "300"))  # audio level below this = silence
+SILENCE_DURATION = float(os.environ.get("SILENCE_DURATION", "1.5"))  # seconds of silence to stop
 
 SYSTEM_INSTRUCTION = (
     "You are a helpful voice assistant. "
@@ -77,19 +81,38 @@ def wait_for_wakeword() -> None:
 
 
 def listen_and_transcribe() -> str | None:
-    """Record audio after wakeword and transcribe with Google STT."""
+    """Record audio after wakeword, stop on silence, transcribe with Google STT."""
     recorder = PvRecorder(frame_length=512, device_index=MIC_DEVICE_INDEX)
-    print(f"Listening for {LISTEN_SECONDS} seconds...")
+    print("Listening... (speak now, stops on silence)")
     recorder.start()
 
     frames: list[bytes] = []
-    total = int(SAMPLE_RATE / 512 * LISTEN_SECONDS)
-    for _ in range(total):
+    max_frames = int(SAMPLE_RATE / 512 * MAX_LISTEN_SECONDS)
+    silence_frames_needed = int(SAMPLE_RATE / 512 * SILENCE_DURATION)
+    consecutive_silent = 0
+    has_speech = False
+
+    for _ in range(max_frames):
         frame = recorder.read()
         frames.append(b"".join(v.to_bytes(2, "little", signed=True) for v in frame))
 
+        level = max(abs(v) for v in frame)
+        if level > SILENCE_THRESHOLD:
+            has_speech = True
+            consecutive_silent = 0
+        else:
+            consecutive_silent += 1
+
+        # Stop after sustained silence, but only if we heard speech first
+        if has_speech and consecutive_silent >= silence_frames_needed:
+            break
+
     recorder.stop()
     recorder.delete()
+
+    if not has_speech:
+        print("No speech detected.")
+        return None
 
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
         wav_path = f.name

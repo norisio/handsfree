@@ -131,6 +131,8 @@ Optional:
 |---------------|---------------------|-------------------------|
 | GEMINI_MODEL  | gemini-2.5-flash    | Gemini model to use     |
 | TTS_SPEED     | 1.3                 | Playback speed (1.0 = normal) |
+| SILENCE_THRESHOLD | 300             | Audio level below this = silence |
+| SILENCE_DURATION  | 1.5             | Seconds of silence to stop recording |
 
 ## Project Structure
 
