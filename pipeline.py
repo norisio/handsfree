@@ -42,6 +42,9 @@ WAKEWORD_LABEL = "ジェミニさん"
 SAMPLE_RATE = 16000
 MAX_LISTEN_SECONDS = 15
 TTS_SPEED = float(os.environ.get("TTS_SPEED", "1.3"))  # 1.0 = normal, 1.5 = 50% faster
+ASSETS_DIR = os.path.join(os.path.dirname(__file__), "assets")
+SFX_DETECTED = os.path.join(ASSETS_DIR, "detected.mp3")
+SFX_RECORDED = os.path.join(ASSETS_DIR, "recorded.mp3")
 
 # Silence detection
 SILENCE_THRESHOLD = int(os.environ.get("SILENCE_THRESHOLD", "300"))  # audio level below this = silence
@@ -55,6 +58,16 @@ SYSTEM_INSTRUCTION = (
 )
 
 SENTENCE_DELIMITERS = set("。！？.!?\n")
+
+
+def play_sfx(path: str) -> None:
+    """Play a sound effect (non-blocking)."""
+    if os.path.exists(path):
+        subprocess.Popen(
+            ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", path],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
 
 
 def detect_lang(text: str) -> str:
@@ -79,6 +92,7 @@ def wait_for_wakeword() -> None:
             frame = recorder.read()
             if porcupine.process(frame) >= 0:
                 print(f"[{time.strftime('%H:%M:%S')}] Wakeword detected!")
+                play_sfx(SFX_DETECTED)
                 return
     finally:
         recorder.stop()
@@ -119,6 +133,8 @@ def listen_and_transcribe() -> str | None:
     if not has_speech:
         print("No speech detected.")
         return None
+
+    play_sfx(SFX_RECORDED)
 
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
         wav_path = f.name
