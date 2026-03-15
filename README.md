@@ -130,6 +130,7 @@ Optional:
 | Variable      | Default             | Description             |
 |---------------|---------------------|-------------------------|
 | GEMINI_MODEL  | gemini-2.5-flash    | Gemini model to use     |
+| TTS_SPEED     | 1.3                 | Playback speed (1.0 = normal) |
 
 ## Project Structure
 

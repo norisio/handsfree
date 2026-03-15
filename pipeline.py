@@ -37,6 +37,7 @@ LANGUAGE = "ja-JP"
 WAKEWORD = "computer"
 SAMPLE_RATE = 16000
 LISTEN_SECONDS = 5
+TTS_SPEED = float(os.environ.get("TTS_SPEED", "1.3"))  # 1.0 = normal, 1.5 = 50% faster
 
 SYSTEM_INSTRUCTION = (
     "You are a helpful voice assistant. "
@@ -123,10 +124,11 @@ def _tts_worker(audio_queue: Queue) -> None:
             break
         mp3_path = item
         try:
-            subprocess.run(
-                ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", mp3_path],
-                check=True,
-            )
+            cmd = ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet"]
+            if TTS_SPEED != 1.0:
+                cmd += ["-af", f"atempo={TTS_SPEED}"]
+            cmd.append(mp3_path)
+            subprocess.run(cmd, check=True)
         finally:
             os.unlink(mp3_path)
         audio_queue.task_done()
