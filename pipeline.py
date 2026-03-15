@@ -80,7 +80,9 @@ def detect_lang(text: str) -> str:
 def wait_for_wakeword() -> None:
     """Block until wakeword is detected."""
     porcupine = pvporcupine.create(
-        access_key=PV_ACCESS_KEY, keyword_paths=[WAKEWORD_PATH]
+        access_key=PV_ACCESS_KEY,
+        keyword_paths=[WAKEWORD_PATH],
+        model_path=os.path.join(ASSETS_DIR, "porcupine_params_ja.pv"),
     )
     recorder = PvRecorder(
         frame_length=porcupine.frame_length, device_index=MIC_DEVICE_INDEX
