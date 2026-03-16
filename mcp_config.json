@@ -3,6 +3,10 @@
     "datetime": {
       "command": "uv",
       "args": ["run", "python", "servers/datetime_server.py"]
+    },
+    "androidtv": {
+      "command": "uv",
+      "args": ["run", "--directory", "servers/androidtv_mcp", "python", "server.py"]
     }
   }
 }
