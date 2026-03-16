@@ -113,7 +113,7 @@ switch models if needed.
 
 - Python 3.13.5 (managed with uv 0.10.10)
 - Node.js v20.19.2 + npm 9.2.0
-- System deps: flac, ffplay (ffmpeg)
+- System deps: flac, ffmpeg, libportaudio2
 - SSH: nao@ras.local
 
 ## Required API Keys
