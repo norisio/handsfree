@@ -13,7 +13,6 @@ Usage:
 import asyncio
 import os
 
-os.environ["PYGAME_HIDE_SUPPORT_PROMPT"] = "1"
 import subprocess
 import tempfile
 import threading
@@ -21,8 +20,10 @@ import time
 import wave
 from queue import Queue
 
-import pygame.mixer
+import numpy as np
 import pvporcupine
+import sounddevice as sd
+import soundfile as sf
 import speech_recognition as sr
 from dotenv import load_dotenv
 from google import genai
@@ -64,18 +65,25 @@ SYSTEM_INSTRUCTION = (
 SENTENCE_DELIMITERS = set("。！？.!?\n")
 
 
-# Preload sound effects into memory
-pygame.mixer.init(frequency=44100)
-_sfx_cache: dict[str, pygame.mixer.Sound] = {}
+# Preload sound effects into memory as numpy arrays
+_sfx_cache: dict[str, tuple[np.ndarray, int]] = {}
 for _sfx_path in (SFX_DETECTED, SFX_RECORDED, SFX_ERROR):
     if os.path.exists(_sfx_path):
-        _sfx_cache[_sfx_path] = pygame.mixer.Sound(_sfx_path)
+        _wav = _sfx_path + ".wav"
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", _sfx_path, "-ar", "44100", "-ac", "1", "-sample_fmt", "s16", _wav],
+            capture_output=True, check=True,
+        )
+        _data, _sr = sf.read(_wav)
+        os.unlink(_wav)
+        _sfx_cache[_sfx_path] = (_data, _sr)
 
 
 def play_sfx(path: str) -> None:
     """Play a preloaded sound effect (non-blocking, instant)."""
     if path in _sfx_cache:
-        _sfx_cache[path].play()
+        data, sr = _sfx_cache[path]
+        sd.play(data, sr, blocksize=2048)
 
 
 def detect_lang(text: str) -> str:
@@ -204,17 +212,15 @@ def _synth_worker(text_queue: Queue, wav_queue: Queue) -> None:
 
 
 def _play_worker(wav_queue: Queue) -> None:
-    """Background thread: play wav files from queue via pygame."""
-    tts_channel = pygame.mixer.Channel(1)
+    """Background thread: play wav files from queue via sounddevice."""
     while True:
         wav_path = wav_queue.get()
         if wav_path is None:
             break
         try:
-            sound = pygame.mixer.Sound(wav_path)
-            tts_channel.play(sound)
-            while tts_channel.get_busy():
-                time.sleep(0.05)
+            data, sr = sf.read(wav_path)
+            sd.play(data, sr, blocksize=2048)
+            sd.wait()
         finally:
             if os.path.exists(wav_path):
                 os.unlink(wav_path)
