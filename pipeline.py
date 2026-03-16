@@ -62,7 +62,7 @@ SENTENCE_DELIMITERS = set("。！？.!?\n")
 
 
 # Preload sound effects into memory
-pygame.mixer.init()
+pygame.mixer.init(frequency=44100)
 _sfx_cache: dict[str, pygame.mixer.Sound] = {}
 for _sfx_path in (SFX_DETECTED, SFX_RECORDED):
     if os.path.exists(_sfx_path):
@@ -169,20 +169,30 @@ def listen_and_transcribe() -> str | None:
 
 
 def _tts_worker(audio_queue: Queue) -> None:
-    """Background thread: pull audio file paths from queue and play them."""
+    """Background thread: pull audio file paths from queue and play via pygame."""
+    tts_channel = pygame.mixer.Channel(1)  # channel 0 for SFX, 1 for TTS
     while True:
         item = audio_queue.get()
         if item is None:  # poison pill
             break
         mp3_path = item
+        wav_path = mp3_path.replace(".mp3", ".wav")
         try:
-            cmd = ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet"]
+            # Convert mp3 → wav at mixer frequency, applying speed if needed
+            cmd = ["ffmpeg", "-y", "-i", mp3_path, "-ar", "44100", "-ac", "1", "-sample_fmt", "s16"]
             if TTS_SPEED != 1.0:
                 cmd += ["-af", f"atempo={TTS_SPEED}"]
-            cmd.append(mp3_path)
-            subprocess.run(cmd, check=True)
+            cmd.append(wav_path)
+            subprocess.run(cmd, capture_output=True, check=True)
+
+            sound = pygame.mixer.Sound(wav_path)
+            tts_channel.play(sound)
+            while tts_channel.get_busy():
+                time.sleep(0.05)
         finally:
-            os.unlink(mp3_path)
+            for p in (mp3_path, wav_path):
+                if os.path.exists(p):
+                    os.unlink(p)
         audio_queue.task_done()
 
 
