@@ -146,3 +146,27 @@ handsfree/
     datetime_server.py  # Built-in datetime MCP server
   .env                 # API keys (not committed)
 ```
+
+## Running as a Service
+
+The assistant runs as a systemd user service, starting automatically at boot.
+
+### Install
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp handsfree.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable handsfree.service
+sudo loginctl enable-linger $USER
+```
+
+### Manage
+
+```bash
+systemctl --user start handsfree       # start
+systemctl --user stop handsfree        # stop
+systemctl --user restart handsfree     # restart
+systemctl --user status handsfree      # check status
+journalctl --user -u handsfree -f      # follow logs
+```
