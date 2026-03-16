@@ -46,6 +46,7 @@ TTS_SPEED = float(os.environ.get("TTS_SPEED", "1.3"))  # 1.0 = normal, 1.5 = 50%
 ASSETS_DIR = os.path.join(os.path.dirname(__file__), "assets")
 SFX_DETECTED = os.path.join(ASSETS_DIR, "detected.mp3")
 SFX_RECORDED = os.path.join(ASSETS_DIR, "recorded.mp3")
+SFX_ERROR = os.path.join(ASSETS_DIR, "error.mp3")
 
 # Silence detection
 SILENCE_THRESHOLD = int(os.environ.get("SILENCE_THRESHOLD", "300"))  # audio level below this = silence
@@ -64,7 +65,7 @@ SENTENCE_DELIMITERS = set("。！？.!?\n")
 # Preload sound effects into memory
 pygame.mixer.init(frequency=44100)
 _sfx_cache: dict[str, pygame.mixer.Sound] = {}
-for _sfx_path in (SFX_DETECTED, SFX_RECORDED):
+for _sfx_path in (SFX_DETECTED, SFX_RECORDED, SFX_ERROR):
     if os.path.exists(_sfx_path):
         _sfx_cache[_sfx_path] = pygame.mixer.Sound(_sfx_path)
 
@@ -234,27 +235,28 @@ def stream_and_speak(
     # Import here to avoid circular
     from mcp_client import gemini_stream_with_tools
 
-    for text_chunk in gemini_stream_with_tools(
-        client=client,
-        model=os.environ.get("GEMINI_MODEL", "gemini-2.5-flash"),
-        contents=messages,
-        system_instruction=SYSTEM_INSTRUCTION,
-        mcp=mcp,
-        loop=loop,
-    ):
-        full_response.append(text_chunk)
-        for char in text_chunk:
-            sentence_buf.append(char)
-            if char in SENTENCE_DELIMITERS:
-                flush_sentence()
+    try:
+        for text_chunk in gemini_stream_with_tools(
+            client=client,
+            model=os.environ.get("GEMINI_MODEL", "gemini-2.5-flash"),
+            contents=messages,
+            system_instruction=SYSTEM_INSTRUCTION,
+            mcp=mcp,
+            loop=loop,
+        ):
+            full_response.append(text_chunk)
+            for char in text_chunk:
+                sentence_buf.append(char)
+                if char in SENTENCE_DELIMITERS:
+                    flush_sentence()
 
-    # Flush any remaining text
-    flush_sentence()
-
-    # Wait for all audio to finish playing
-    audio_queue.join()
-    audio_queue.put(None)  # stop worker
-    player.join()
+        # Flush any remaining text
+        flush_sentence()
+    finally:
+        # Always clean up the TTS worker thread
+        audio_queue.join()
+        audio_queue.put(None)  # stop worker
+        player.join()
 
     full_text = "".join(full_response).strip()
 
@@ -295,6 +297,10 @@ def main() -> None:
             except KeyboardInterrupt:
                 print("\nGoodbye!")
                 break
+            except Exception as e:
+                print(f"Error: {e}")
+                play_sfx(SFX_ERROR)
+                time.sleep(1)  # let SFX finish before resuming
     finally:
         loop.run_until_complete(mcp.close())
         loop.close()
