@@ -1,0 +1,16 @@
+[Unit]
+Description=Handsfree AI Assistant
+After=pipewire.service sound.target
+Wants=pipewire.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/nao/repo/handsfree
+Environment=PATH=/home/nao/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/nao/.local/bin/uv run python pipeline.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
