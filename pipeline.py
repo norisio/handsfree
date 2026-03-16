@@ -171,41 +171,54 @@ def listen_and_transcribe() -> str | None:
         os.unlink(wav_path)
 
 
-def _tts_worker(audio_queue: Queue) -> None:
-    """Background thread: pull audio file paths from queue and play via pygame."""
-    tts_channel = pygame.mixer.Channel(1)  # channel 0 for SFX, 1 for TTS
+def _synth_worker(text_queue: Queue, wav_queue: Queue) -> None:
+    """Background thread: convert text → gTTS mp3 → wav, feed into wav_queue."""
     while True:
-        item = audio_queue.get()
-        if item is None:  # poison pill
+        item = text_queue.get()
+        if item is None:
+            wav_queue.put(None)
             break
-        mp3_path = item
-        wav_path = mp3_path.replace(".mp3", ".wav")
+        sentence, lang = item
+        mp3_path = wav_path = None
         try:
-            # Convert mp3 → wav at mixer frequency, applying speed if needed
+            with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
+                mp3_path = f.name
+            tts = gTTS(text=sentence, lang=lang)
+            tts.save(mp3_path)
+
+            wav_path = mp3_path.replace(".mp3", ".wav")
             cmd = ["ffmpeg", "-y", "-i", mp3_path, "-ar", "44100", "-ac", "1", "-sample_fmt", "s16"]
             if TTS_SPEED != 1.0:
                 cmd += ["-af", f"atempo={TTS_SPEED}"]
             cmd.append(wav_path)
             subprocess.run(cmd, capture_output=True, check=True)
 
+            wav_queue.put(wav_path)
+        except Exception:
+            if wav_path and os.path.exists(wav_path):
+                os.unlink(wav_path)
+        finally:
+            if mp3_path and os.path.exists(mp3_path):
+                os.unlink(mp3_path)
+        text_queue.task_done()
+
+
+def _play_worker(wav_queue: Queue) -> None:
+    """Background thread: play wav files from queue via pygame."""
+    tts_channel = pygame.mixer.Channel(1)
+    while True:
+        wav_path = wav_queue.get()
+        if wav_path is None:
+            break
+        try:
             sound = pygame.mixer.Sound(wav_path)
             tts_channel.play(sound)
             while tts_channel.get_busy():
                 time.sleep(0.05)
         finally:
-            for p in (mp3_path, wav_path):
-                if os.path.exists(p):
-                    os.unlink(p)
-        audio_queue.task_done()
-
-
-def _synthesize_sentence(sentence: str, lang: str, audio_queue: Queue) -> None:
-    """Synthesize one sentence and enqueue the audio for playback."""
-    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
-        mp3_path = f.name
-    tts = gTTS(text=sentence, lang=lang)
-    tts.save(mp3_path)
-    audio_queue.put(mp3_path)
+            if os.path.exists(wav_path):
+                os.unlink(wav_path)
+        wav_queue.task_done()
 
 
 def stream_and_speak(
@@ -218,9 +231,12 @@ def stream_and_speak(
     client = genai.Client(api_key=GEMINI_API_KEY)
     messages = history + [{"role": "user", "parts": [{"text": prompt}]}]
 
-    # Audio playback queue and worker thread
-    audio_queue: Queue = Queue()
-    player = threading.Thread(target=_tts_worker, args=(audio_queue,), daemon=True)
+    # Two-queue pipeline: text → synth → wav → play
+    text_queue: Queue = Queue()
+    wav_queue: Queue = Queue()
+    synth = threading.Thread(target=_synth_worker, args=(text_queue, wav_queue), daemon=True)
+    player = threading.Thread(target=_play_worker, args=(wav_queue,), daemon=True)
+    synth.start()
     player.start()
 
     full_response = []
@@ -232,7 +248,7 @@ def stream_and_speak(
         if sentence:
             lang = detect_lang(sentence)
             print(f"  >> {sentence}")
-            _synthesize_sentence(sentence, lang, audio_queue)
+            text_queue.put((sentence, lang))
 
     # Import here to avoid circular
     from mcp_client import gemini_stream_with_tools
@@ -255,9 +271,11 @@ def stream_and_speak(
         # Flush any remaining text
         flush_sentence()
     finally:
-        # Always clean up the TTS worker thread
-        audio_queue.join()
-        audio_queue.put(None)  # stop worker
+        # Always clean up worker threads
+        text_queue.join()
+        text_queue.put(None)  # poison pill → synth forwards to wav_queue
+        synth.join()
+        wav_queue.join()
         player.join()
 
     full_text = "".join(full_response).strip()
