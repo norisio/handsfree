@@ -12,6 +12,8 @@ Usage:
 
 import asyncio
 import os
+
+os.environ["PYGAME_HIDE_SUPPORT_PROMPT"] = "1"
 import subprocess
 import tempfile
 import threading
