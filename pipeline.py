@@ -19,6 +19,7 @@ import time
 import wave
 from queue import Queue
 
+import pygame.mixer
 import pvporcupine
 import speech_recognition as sr
 from dotenv import load_dotenv
@@ -60,14 +61,18 @@ SYSTEM_INSTRUCTION = (
 SENTENCE_DELIMITERS = set("。！？.!?\n")
 
 
+# Preload sound effects into memory
+pygame.mixer.init()
+_sfx_cache: dict[str, pygame.mixer.Sound] = {}
+for _sfx_path in (SFX_DETECTED, SFX_RECORDED):
+    if os.path.exists(_sfx_path):
+        _sfx_cache[_sfx_path] = pygame.mixer.Sound(_sfx_path)
+
+
 def play_sfx(path: str) -> None:
-    """Play a sound effect (non-blocking)."""
-    if os.path.exists(path):
-        subprocess.Popen(
-            ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", path],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+    """Play a preloaded sound effect (non-blocking, instant)."""
+    if path in _sfx_cache:
+        _sfx_cache[path].play()
 
 
 def detect_lang(text: str) -> str:
