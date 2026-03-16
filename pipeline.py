@@ -278,11 +278,10 @@ def stream_and_speak(
         flush_sentence()
     finally:
         # Always clean up worker threads
-        text_queue.join()
-        text_queue.put(None)  # poison pill → synth forwards to wav_queue
-        synth.join()
-        wav_queue.join()
-        player.join()
+        text_queue.join()         # wait for all sentences to be synthesized
+        text_queue.put(None)      # poison pill → synth forwards None to wav_queue
+        synth.join()              # synth exits
+        player.join()             # player plays remaining wavs, sees None, exits
 
     full_text = "".join(full_response).strip()
 
