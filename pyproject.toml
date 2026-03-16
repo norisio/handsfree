@@ -11,6 +11,7 @@ dependencies = [
     "pvorca>=3.0.0",
     "pvporcupine>=4.0.2",
     "pvrecorder>=1.2.7",
+    "pygame>=2.6.1",
     "python-dotenv>=1.2.2",
     "speechrecognition>=3.15.1",
 ]
